@@ -1,0 +1,833 @@
+<html>
+<title>Life: Survival</title>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root {
+            color-scheme: dark;
+            --canvas-bg-color: rgba(0, 0, 0, 0);
+        }
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #111;
+        }
+        #canvas {
+            border: none;
+            outline: none;
+            background-color: var(--canvas-bg-color);
+            cursor: crosshair;
+            display: block;
+        }
+        .stats {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+            background: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 3px;
+        }
+        #fullscreenBtn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-family: monospace;
+        }
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+        }
+        #controls button {
+            margin: 2px;
+            background: #333;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        #controls button.active {
+            background: #555;
+        }
+        .grid {
+            position: absolute;
+            pointer-events: none;
+            opacity: 0.2;
+        }
+    </style>
+</head>
+<body>
+    <div class="stats" id="stats"></div>
+    <button id="fullscreenBtn">Fullscreen</button>
+    <div id="controls">
+        <div>
+            <button id="agentTool">Agent (1)</button>
+            <button id="foodTool">Food</button>
+            <button id="wallTool">Wall</button>
+            <button id="waterTool">Water</button>
+            <button id="removeTool">Remove</button>
+        </div>
+        <div>
+            <button id="spawn1">Spawn 1</button>
+            <button id="spawn5">Spawn 5</button>
+            <button id="spawn10">Spawn 10</button>
+        </div>
+    </div>
+    <canvas id="canvas" tabindex="1"></canvas>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.17"></script>
+    <script>
+        const settings = {
+            fps: 0,
+            drawings: {
+                background_color: '#000000',
+                stats: true,
+                smoothAnimations: false,
+                showVision: false,
+                showPaths: false,
+                showNeeds: false,
+                showGroups: false,
+                showGrid: false,
+                showEnergy: false,
+                showAge: false
+            },
+            agentParams: {
+                size: 8,
+                speed: 1.5,
+                visionRange: 100,
+                hungerRate: 0.002,
+                energyCost: 0.005,
+                reproductionCost: 0.8,
+                mutationRate: 0.1,
+                groupRange: 50,
+                aggression: false,
+                attackCost: 0.2,
+                attackDamage: 0.3,
+                pathfindingSteps: 20,
+                avoidanceRadius: 30
+            },
+            foodParams: {
+                size: 6,
+                energyValue: 0.5,
+                clusterSize: 3
+            },
+            worldParams: {
+                width: 0,
+                height: 0,
+                foodSpawnChance: 0.003,
+                gridSize: 30
+            },
+            presets: {
+                peaceful: () => applyPreset('peaceful'),
+                competitive: () => applyPreset('competitive'),
+                scarce: () => applyPreset('scarce'),
+                abundant: () => applyPreset('abundant')
+            },
+            pause: false,
+            reset: () => {initializeWorld()},
+            gui: null,
+            fullscreen: false,
+            spawnCount: 1
+        };
+
+        class Agent {
+            constructor(x, y, energy = 0.8) {
+                this.x = x;
+                this.y = y;
+                this.dx = 0;
+                this.dy = 0;
+                this.energy = energy;
+                this.hunger = 0;
+                this.age = 0;
+                this.memory = [];
+                this.target = null;
+                this.path = [];
+                this.group = null;
+                this.genes = {
+                    speed: settings.agentParams.speed * (0.8 + Math.random() * 0.4),
+                    visionRange: settings.agentParams.visionRange * (0.8 + Math.random() * 0.4),
+                    hungerRate: settings.agentParams.hungerRate * (0.8 + Math.random() * 0.4)
+                };
+                this.color = this.getColor();
+            }
+            
+            getColor() {
+                const energyLevel = Math.min(1, this.energy);
+                const r = Math.floor(255 * (1 - energyLevel));
+                const g = Math.floor(255 * energyLevel);
+                return `rgb(${r},${g},50)`;
+            }
+            
+            update(world) {
+                if (this.energy <= 0) return false;
+                
+                this.age++;
+                this.hunger += this.genes.hungerRate;
+                this.energy -= settings.agentParams.energyCost;
+                
+                if (this.hunger > 0.3 || this.energy < 0.3) {
+                    this.findFood(world);
+                }
+                
+                if (settings.agentParams.aggression && this.energy > 0.5 && Math.random() < 0.01) {
+                    this.findTarget(world);
+                }
+                
+                if (this.target) {
+                    this.followPath(world);
+                } else {
+                    if (this.group && settings.drawings.showGroups) {
+                        this.moveWithGroup(world);
+                    } else if (Math.random() < 0.05) {
+                        this.dx = (Math.random() - 0.5) * this.genes.speed * 0.5;
+                        this.dy = (Math.random() - 0.5) * this.genes.speed * 0.5;
+                    }
+                }
+                
+                this.x += this.dx;
+                this.y += this.dy;
+                
+                this.x = Math.max(0, Math.min(settings.worldParams.width, this.x));
+                this.y = Math.max(0, Math.min(settings.worldParams.height, this.y));
+                
+                if (this.energy > settings.agentParams.reproductionCost && Math.random() < 0.001) {
+                    return this.reproduce(world);
+                }
+                
+                return true;
+            }
+            
+            findFood(world) {
+                if (this.memory.length > 0) {
+                    this.target = this.memory[0];
+                    this.calculatePath(world);
+                    return;
+                }
+                
+                let closestFood = null;
+                let closestDist = Infinity;
+                
+                for (const food of world.foods) {
+                    const dx = food.x - this.x;
+                    const dy = food.y - this.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    if (dist < this.genes.visionRange && dist < closestDist) {
+                        closestDist = dist;
+                        closestFood = food;
+                    }
+                }
+                
+                if (closestFood) {
+                    this.target = closestFood;
+                    this.calculatePath(world);
+                    this.memory.push([closestFood.x, closestFood.y]);
+                    if (this.memory.length > 3) this.memory.shift();
+                }
+            }
+            
+            calculatePath(world) {
+                this.path = [];
+                const tx = this.target.x || this.target[0];
+                const ty = this.target.y || this.target[1];
+                
+                let currentX = this.x;
+                let currentY = this.y;
+                const stepSize = 10;
+                
+                for (let i = 0; i < settings.agentParams.pathfindingSteps; i++) {
+                    let dx = tx - currentX;
+                    let dy = ty - currentY;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    if (dist < stepSize) {
+                        this.path.push([tx, ty]);
+                        break;
+                    }
+                    
+                    dx = (dx / dist) * stepSize;
+                    dy = (dy / dist) * stepSize;
+                    
+                    for (const wall of world.walls) {
+                        const wx = wall.x + settings.worldParams.gridSize/2;
+                        const wy = wall.y + settings.worldParams.gridSize/2;
+                        const wallDist = Math.sqrt(Math.pow(wx - currentX, 2) + Math.pow(wy - currentY, 2));
+                        
+                        if (wallDist < settings.agentParams.avoidanceRadius) {
+                            const angle = Math.atan2(currentY - wy, currentX - wx);
+                            dx += Math.cos(angle) * 5;
+                            dy += Math.sin(angle) * 5;
+                        }
+                    }
+                    
+                    currentX += dx;
+                    currentY += dy;
+                    this.path.push([currentX, currentY]);
+                }
+            }
+            
+            followPath(world) {
+                if (this.path.length === 0) {
+                    this.calculatePath(world);
+                    return;
+                }
+                
+                const [nextX, nextY] = this.path[0];
+                const dx = nextX - this.x;
+                const dy = nextY - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 5) {
+                    this.path.shift();
+                    if (this.path.length === 0) {
+                        if (this.target instanceof Food) {
+                            this.eat(this.target, world);
+                        } else if (this.target instanceof Agent) {
+                            this.attack(this.target, world);
+                        }
+                        this.target = null;
+                        return;
+                    }
+                }
+                
+                const speed = this.genes.speed * (0.5 + 0.5 * this.energy);
+                this.dx = (dx / dist) * speed;
+                this.dy = (dy / dist) * speed;
+            }
+            
+            moveWithGroup(world) {
+                let groupX = 0, groupY = 0, groupCount = 0;
+                
+                for (const agent of world.agents) {
+                    if (agent === this || agent.energy <= 0) continue;
+                    const dx = agent.x - this.x;
+                    const dy = agent.y - this.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    if (dist < settings.agentParams.groupRange) {
+                        groupX += agent.x;
+                        groupY += agent.y;
+                        groupCount++;
+                    }
+                }
+                
+                if (groupCount > 0) {
+                    groupX /= groupCount;
+                    groupY /= groupCount;
+                    const dx = groupX - this.x;
+                    const dy = groupY - this.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    if (dist > 10) {
+                        const speed = this.genes.speed * 0.3;
+                        this.dx = (dx / dist) * speed;
+                        this.dy = (dy / dist) * speed;
+                    }
+                }
+            }
+            
+            eat(food, world) {
+                this.energy += settings.foodParams.energyValue;
+                this.hunger = Math.max(0, this.hunger - 0.3);
+                world.removeFood(food);
+                world.spawnNewFood();
+            }
+            
+            attack(target, world) {
+                if (this.energy > settings.agentParams.attackCost) {
+                    this.energy -= settings.agentParams.attackCost;
+                    target.energy -= settings.agentParams.attackDamage;
+                    if (target.energy <= 0) {
+                        this.energy += 0.3;
+                    }
+                }
+                this.target = null;
+            }
+            
+            reproduce(world) {
+                this.energy *= 0.5;
+                const child = new Agent(
+                    this.x + (Math.random() - 0.5) * 20,
+                    this.y + (Math.random() - 0.5) * 20,
+                    this.energy * 0.5
+                );
+                
+                if (Math.random() < settings.agentParams.mutationRate) {
+                    const geneToMutate = ['speed', 'visionRange', 'hungerRate'][Math.floor(Math.random() * 3)];
+                    child.genes[geneToMutate] *= (0.9 + Math.random() * 0.2);
+                } else {
+                    child.genes = {...this.genes};
+                }
+                
+                world.agents.push(child);
+                return false;
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = this.getColor();
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, settings.agentParams.size/2, 0, Math.PI * 2);
+                ctx.fill();
+                
+                if (settings.drawings.showNeeds) {
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(this.x - settings.agentParams.size/2, this.y - settings.agentParams.size/2 - 5, 
+                                settings.agentParams.size * this.hunger, 2);
+                    ctx.fillStyle = 'green';
+                    ctx.fillRect(this.x - settings.agentParams.size/2, this.y - settings.agentParams.size/2 - 8, 
+                                settings.agentParams.size * this.energy, 2);
+                }
+                
+                if (settings.drawings.showVision) {
+                    ctx.strokeStyle = 'rgba(100, 255, 100, 0.2)';
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.genes.visionRange, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                
+                if (settings.drawings.showPaths && this.path.length > 0) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, this.y);
+                    for (const [px, py] of this.path) {
+                        ctx.lineTo(px, py);
+                    }
+                    ctx.stroke();
+                }
+                
+                if (settings.drawings.showEnergy) {
+                    ctx.fillStyle = 'white';
+                    ctx.font = '8px Arial';
+                    ctx.fillText(Math.floor(this.energy*100)/100, this.x - 10, this.y - 10);
+                }
+                
+                if (settings.drawings.showAge) {
+                    ctx.fillStyle = 'white';
+                    ctx.font = '8px Arial';
+                    ctx.fillText(this.age, this.x - 5, this.y + 20);
+                }
+            }
+        }
+
+        class Food {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = 'yellow';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, settings.foodParams.size/2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Wall {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.size = settings.worldParams.gridSize;
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = 'gray';
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        class Water {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.size = settings.worldParams.gridSize;
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = 'rgba(50, 50, 255, 0.7)';
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        class World {
+            constructor() {
+                this.agents = [];
+                this.foods = [];
+                this.walls = [];
+                this.waters = [];
+            }
+            
+            update() {
+                for (let i = this.agents.length - 1; i >= 0; i--) {
+                    if (!this.agents[i].update(this)) {
+                        this.agents.splice(i, 1);
+                    }
+                }
+                
+                if (Math.random() < settings.worldParams.foodSpawnChance) {
+                    this.spawnNewFood();
+                }
+            }
+            
+            addAgent(x, y, energy = 0.8) {
+                this.agents.push(new Agent(x, y, energy));
+            }
+            
+            addFood(x, y) {
+                this.foods.push(new Food(x, y));
+            }
+            
+            spawnNewFood() {
+                this.addFood(
+                    Math.random() * settings.worldParams.width,
+                    Math.random() * settings.worldParams.height
+                );
+            }
+            
+            removeFood(food) {
+                const index = this.foods.indexOf(food);
+                if (index !== -1) {
+                    this.foods.splice(index, 1);
+                }
+            }
+            
+            addWall(x, y) {
+                const gridSize = settings.worldParams.gridSize;
+                const gridX = Math.floor(x / gridSize) * gridSize;
+                const gridY = Math.floor(y / gridSize) * gridSize;
+                
+                for (const wall of this.walls) {
+                    if (wall.x === gridX && wall.y === gridY) return;
+                }
+                
+                this.walls.push(new Wall(gridX, gridY));
+            }
+            
+            addWater(x, y) {
+                const gridSize = settings.worldParams.gridSize;
+                const gridX = Math.floor(x / gridSize) * gridSize;
+                const gridY = Math.floor(y / gridSize) * gridSize;
+                
+                for (const water of this.waters) {
+                    if (water.x === gridX && water.y === gridY) return;
+                }
+                
+                this.waters.push(new Water(gridX, gridY));
+            }
+            
+            removeObstacle(x, y) {
+                const gridSize = settings.worldParams.gridSize;
+                const gridX = Math.floor(x / gridSize) * gridSize;
+                const gridY = Math.floor(y / gridSize) * gridSize;
+                
+                for (let i = this.walls.length - 1; i >= 0; i--) {
+                    if (this.walls[i].x === gridX && this.walls[i].y === gridY) {
+                        this.walls.splice(i, 1);
+                        return;
+                    }
+                }
+                
+                for (let i = this.waters.length - 1; i >= 0; i--) {
+                    if (this.waters[i].x === gridX && this.waters[i].y === gridY) {
+                        this.waters.splice(i, 1);
+                        return;
+                    }
+                }
+            }
+            
+            draw(ctx) {
+                if (settings.drawings.showGrid) {
+                    this.drawGrid(ctx);
+                }
+                
+                for (const water of this.waters) {
+                    water.draw(ctx);
+                }
+                
+                for (const wall of this.walls) {
+                    wall.draw(ctx);
+                }
+                
+                for (const food of this.foods) {
+                    food.draw(ctx);
+                }
+                
+                for (const agent of this.agents) {
+                    agent.draw(ctx);
+                }
+            }
+            
+            drawGrid(ctx) {
+                const gridSize = settings.worldParams.gridSize;
+                ctx.strokeStyle = 'rgba(100, 100, 100, 0.3)';
+                ctx.lineWidth = 1;
+                
+                for (let x = 0; x < settings.worldParams.width; x += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, settings.worldParams.height);
+                    ctx.stroke();
+                }
+                
+                for (let y = 0; y < settings.worldParams.height; y += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(settings.worldParams.width, y);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext("2d");
+        const statsElement = document.getElementById('stats');
+        const controlsElement = document.getElementById('controls');
+        
+        let world = new World();
+        let lastT = Date.now();
+        let currentTool = 'none';
+        let spawnCount = 1;
+
+        function initializeWorld() {
+            world = new World();
+            createInitialAgents(10);
+            createInitialFood(30);
+        }
+
+        function createInitialAgents(count) {
+            for (let i = 0; i < count; i++) {
+                world.addAgent(
+                    Math.random() * settings.worldParams.width,
+                    Math.random() * settings.worldParams.height,
+                    0.8 + Math.random() * 0.2
+                );
+            }
+        }
+
+        function createInitialFood(count) {
+            for (let i = 0; i < count; i++) {
+                world.spawnNewFood();
+            }
+        }
+
+        function applyPreset(preset) {
+            switch(preset) {
+                case 'peaceful':
+                    settings.agentParams.aggression = false;
+                    settings.agentParams.hungerRate = 0.001;
+                    settings.foodParams.energyValue = 0.6;
+                    settings.worldParams.foodSpawnChance = 0.01;
+                    break;
+                case 'competitive':
+                    settings.agentParams.aggression = true;
+                    settings.agentParams.hungerRate = 0.003;
+                    settings.foodParams.energyValue = 0.3;
+                    settings.worldParams.foodSpawnChance = 0.005;
+                    break;
+                case 'scarce':
+                    settings.agentParams.hungerRate = 0.002;
+                    settings.foodParams.energyValue = 0.4;
+                    settings.worldParams.foodSpawnChance = 0.001;
+                    break;
+                case 'abundant':
+                    settings.agentParams.hungerRate = 0.001;
+                    settings.foodParams.energyValue = 0.8;
+                    settings.worldParams.foodSpawnChance = 0.02;
+                    break;
+            }
+            initializeWorld();
+        }
+
+        function updateCanvasDimensions() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            settings.worldParams.width = canvas.width;
+            settings.worldParams.height = canvas.height;
+        }
+
+        function setupClicks() {
+            canvas.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                if (currentTool === 'agent') {
+                    for (let i = 0; i < spawnCount; i++) {
+                        world.addAgent(x + (Math.random() - 0.5) * 20, y + (Math.random() - 0.5) * 20);
+                    }
+                } else if (currentTool === 'food') {
+                    world.addFood(x, y);
+                } else if (currentTool === 'wall') {
+                    world.addWall(x, y);
+                } else if (currentTool === 'water') {
+                    world.addWater(x, y);
+                } else if (currentTool === 'remove') {
+                    world.removeObstacle(x, y);
+                }
+            });
+            
+            document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
+            
+            document.getElementById('agentTool').addEventListener('click', () => {
+                currentTool = 'agent';
+                updateToolButtons();
+            });
+            
+            document.getElementById('foodTool').addEventListener('click', () => {
+                currentTool = 'food';
+                updateToolButtons();
+            });
+            
+            document.getElementById('wallTool').addEventListener('click', () => {
+                currentTool = 'wall';
+                updateToolButtons();
+            });
+            
+            document.getElementById('waterTool').addEventListener('click', () => {
+                currentTool = 'water';
+                updateToolButtons();
+            });
+            
+            document.getElementById('removeTool').addEventListener('click', () => {
+                currentTool = 'remove';
+                updateToolButtons();
+            });
+            
+            document.getElementById('spawn1').addEventListener('click', () => { spawnCount = 1; updateSpawnButtons(); });
+            document.getElementById('spawn5').addEventListener('click', () => { spawnCount = 5; updateSpawnButtons(); });
+            document.getElementById('spawn10').addEventListener('click', () => { spawnCount = 10; updateSpawnButtons(); });
+        }
+
+        function updateToolButtons() {
+            document.getElementById('agentTool').classList.toggle('active', currentTool === 'agent');
+            document.getElementById('foodTool').classList.toggle('active', currentTool === 'food');
+            document.getElementById('wallTool').classList.toggle('active', currentTool === 'wall');
+            document.getElementById('waterTool').classList.toggle('active', currentTool === 'water');
+            document.getElementById('removeTool').classList.toggle('active', currentTool === 'remove');
+        }
+
+        function updateSpawnButtons() {
+            document.getElementById('spawn1').classList.toggle('active', spawnCount === 1);
+            document.getElementById('spawn5').classList.toggle('active', spawnCount === 5);
+            document.getElementById('spawn10').classList.toggle('active', spawnCount === 10);
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                canvas.requestFullscreen().catch(err => console.error('Error attempting to enable fullscreen:', err));
+                controlsElement.style.display = 'block';
+            } else {
+                document.exitFullscreen();
+                controlsElement.style.display = 'none';
+            }
+        }
+
+        function setupGUI() {
+            settings.gui = new lil.GUI();
+            
+            const configFolder = settings.gui.addFolder('Simulation');
+            configFolder.add(settings, 'pause').name('Pause');
+            configFolder.add(settings, 'reset').name('Reset');
+            configFolder.add(settings, 'fps').name('FPS').listen().disable();
+            
+            const agentFolder = settings.gui.addFolder('Agents');
+            agentFolder.add(settings.agentParams, 'size', 2, 20, 1).name('Size');
+            agentFolder.add(settings.agentParams, 'speed', 0.1, 5, 0.1).name('Speed');
+            agentFolder.add(settings.agentParams, 'visionRange', 20, 200, 5).name('Vision');
+            agentFolder.add(settings.agentParams, 'hungerRate', 0.001, 0.01, 0.001).name('Hunger Rate');
+            agentFolder.add(settings.agentParams, 'energyCost', 0.001, 0.02, 0.001).name('Energy Cost');
+            agentFolder.add(settings.agentParams, 'reproductionCost', 0.1, 1, 0.05).name('Reproduction Cost');
+            agentFolder.add(settings.agentParams, 'mutationRate', 0, 0.5, 0.01).name('Mutation Rate');
+            agentFolder.add(settings.agentParams, 'groupRange', 10, 100, 5).name('Group Range');
+            agentFolder.add(settings.agentParams, 'aggression').name('Aggression');
+            agentFolder.add(settings.agentParams, 'attackCost', 0.1, 0.5, 0.05).name('Attack Cost');
+            agentFolder.add(settings.agentParams, 'attackDamage', 0.1, 0.5, 0.05).name('Attack Damage');
+            agentFolder.add(settings.agentParams, 'pathfindingSteps', 5, 50, 1).name('Path Steps');
+            agentFolder.add(settings.agentParams, 'avoidanceRadius', 10, 100, 5).name('Avoidance');
+            
+            const foodFolder = settings.gui.addFolder('Food');
+            foodFolder.add(settings.foodParams, 'size', 2, 20, 1).name('Size');
+            foodFolder.add(settings.foodParams, 'energyValue', 0.1, 1, 0.05).name('Energy');
+            foodFolder.add(settings.foodParams, 'clusterSize', 1, 10, 1).name('Cluster Size');
+            
+            const worldFolder = settings.gui.addFolder('World');
+            worldFolder.add(settings.worldParams, 'foodSpawnChance', 0, 0.02, 0.001).name('Food Spawn');
+            worldFolder.add(settings.worldParams, 'gridSize', 10, 50, 5).name('Grid Size');
+            
+            const displayFolder = settings.gui.addFolder('Display');
+            displayFolder.add(settings.drawings, 'showVision').name('Show Vision');
+            displayFolder.add(settings.drawings, 'showPaths').name('Show Paths');
+            displayFolder.add(settings.drawings, 'showNeeds').name('Show Needs');
+            displayFolder.add(settings.drawings, 'showGroups').name('Show Groups');
+            displayFolder.add(settings.drawings, 'showGrid').name('Show Grid');
+            displayFolder.add(settings.drawings, 'showEnergy').name('Show Energy');
+            displayFolder.add(settings.drawings, 'showAge').name('Show Age');
+            displayFolder.add(settings.drawings, 'stats').name('Show Stats');
+            displayFolder.add(settings.drawings, 'smoothAnimations').name('Smooth Anim');
+            displayFolder.addColor(settings.drawings, 'background_color').name('Background');
+            
+            const presetsFolder = settings.gui.addFolder('Presets');
+            presetsFolder.add(settings.presets, 'peaceful').name('Peaceful');
+            presetsFolder.add(settings.presets, 'competitive').name('Competitive');
+            presetsFolder.add(settings.presets, 'scarce').name('Scarce Food');
+            presetsFolder.add(settings.presets, 'abundant').name('Abundant Food');
+        }
+
+        updateCanvasDimensions();
+        initializeWorld();
+        setupClicks();
+        setupGUI();
+        updateToolButtons();
+        updateSpawnButtons();
+
+        function update() {
+            if (!settings.pause) {
+                updateCanvasDimensions();
+                
+                ctx.fillStyle = settings.drawings.background_color;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                world.update();
+                world.draw(ctx);
+                
+                updateStats();
+            }
+            requestAnimationFrame(update);
+        }
+
+        function updateStats() {
+            var curT = Date.now();
+            if (curT > lastT) {
+                const new_fps = 1000. / (curT - lastT);
+                if (settings.drawings.smoothAnimations) {
+                    settings.fps = Math.round(settings.fps * 0.8 + new_fps * 0.2);
+                } else {
+                    settings.fps = Math.round(new_fps);
+                }
+                lastT = curT;
+            }
+            
+            if (settings.drawings.stats) {
+                statsElement.textContent = `FPS: ${settings.fps} | Agents: ${world.agents.length} | Food: ${world.foods.length}`;
+                statsElement.style.display = 'block';
+            } else {
+                statsElement.style.display = 'none';
+            }
+        }
+
+        update();
+    </script>
+</body>
+</html>
